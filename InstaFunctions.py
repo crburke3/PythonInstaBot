@@ -4,19 +4,22 @@ from Fire import Fire
 from random import randint
 import logging
 import os
+from Fire import ManagementLocations
 
+latency = 1
 
 class InstaBot:
     chrome: webdriver.Chrome
     authenticated = False
     username = ""
     access_token = ""
-    firebase = Fire()
+    firebase = ""
     password = ""
     whitelist: [str] = []
     following = 0
     followers = 0
     posts = 0
+    verified = False
 
     def __init__(self, username: str, password: str, proxy: str = ""):
         mobile_emulation = {"deviceName": "Nexus 5"}
@@ -34,17 +37,18 @@ class InstaBot:
         print("Logging in...")
         self.username = username
         self.password = password
+        self.firebase = Fire(bot=self)
         stats = self.get_user_stats()
         self.following = stats["following"]
         self.followers = stats["followers"]
         self.posts = stats["posts"]
-        if not os.path.isdir("logs"):
-            os.mkdir("logs")
-        log_path = "logs/" + username + ".log"
-        open(log_path, 'a').close()
-        logging.basicConfig(filename=log_path, level=logging.INFO)
+        # if not os.path.isdir("logs"):
+        #     os.mkdir("logs")
+        # log_path = "logs/" + username + ".log"
+        # open(log_path, 'a').close()
+        # logging.basicConfig(filename=log_path, level=logging.INFO)
         self.login(username, password)
-        self.whitelist = self.get_whitelist()
+        self.whitelist = self.firebase.get_whitelist()
 
     def login(self, username: str, password: str):
         self.chrome.get("https://www.instagram.com/accounts/login/")
@@ -57,8 +61,10 @@ class InstaBot:
         user.send_keys(username)
         pwd.send_keys(password)
         pwd.send_keys(u'\ue007')
-        sleep(1)
+        sleep(1 + latency)
         url = self.chrome.current_url
+        if "challenge" in url:
+            self.verify_if_available()
         if "login" in url:
             self.check_login()
         # self.check_notification()
@@ -122,35 +128,8 @@ class InstaBot:
         dom = self.chrome.find_elements_by_class_name("rgFsT ")  # Specifies the location of the username and password
         if len(dom) > 0:
             print("Failed Login")
-            sleep(120)
+            sleep(2)
             self.login(username=self.username, password=self.password)
-
-    def set_whitelist(self, username: str, users: [str]):
-        user_dict = {"users": users}
-        if not self.firebase.db.collection(username).document(u'whitelist').get().exists:
-            self.firebase.db.collection(username).document(u'whitelist').set(user_dict)
-        else:
-            self.firebase.db.collection(username).document(u'whitelist').update(user_dict)
-
-    def get_whitelist(self)->[str]:
-        users = self.firebase.db.collection(self.username).document(u'whitelist').get().to_dict()
-        return users["users"]
-
-    def set_post_queue(self, post_list: [str]):
-        post_dict = {"posts": post_list}
-        if not self.firebase.db.collection(self.username).document(u'post_queue').get().exists:
-            self.firebase.db.collection(self.username).document(u'post_queue').set(post_dict)
-        else:
-            self.firebase.db.collection(self.username).document(u'post_queue').update(post_dict)
-
-    def get_post_queue(self)->[str]:
-        users = self.firebase.db.collection(self.username).document(u'post_queue').get().to_dict()
-        return users["posts"]
-
-    def remove_from_queue(self, post_link: str):
-        curr_queue: [str] = self.get_post_queue()
-        for i in range(curr_queue.count(post_link)): curr_queue.remove(post_link)  # filter
-        self.set_post_queue(curr_queue)
 
     def follow_from_post(self, post_link: str, count: int)->[str]:
         consec_fail = 0
@@ -163,7 +142,10 @@ class InstaBot:
             self.chrome.execute_script("arguments[0].click();", like_btn[0])
             sleep(2)
             follow_count = 0
-            while True:
+            new_scroll = 0
+            old_scroll = 1
+            while new_scroll != old_scroll:
+                old_scroll = self.chrome.execute_script("return window.pageYOffset;")
                 user_list = self.chrome.find_elements_by_xpath(
                     '//*[contains(concat( " ", @class, " " ), concat( " ", "ZUqME", " " ))]')
                 for user in user_list:
@@ -187,9 +169,12 @@ class InstaBot:
                         print("Finished Process on post: " + post_link)
                         print("--- Followed: " + str(follow_count))
                         return ret_list
-                    check_list.append(username)
+                    if username != None:
+                        check_list.append(username)
+                    new_scroll = self.chrome.execute_script("return window.pageYOffset;")
+            return  ret_list
 
-    def follow_user_from_list(self, user_element)->str:
+    def follow_user_from_list(self, user_element, updated_server=False)->str:
         try:
             element_height = user_element.location["y"]
             self.chrome.execute_script("window.scrollTo(0, " + str(element_height - 120) + ");")
@@ -210,6 +195,9 @@ class InstaBot:
                 follow_btn_2 = user_element.find_element_by_xpath('.//*[contains(concat( " ", @class, " " ), concat( " ", "L3NKy", " " ))]')
                 if ("Following" in follow_btn_2.text) | ("Requested" in follow_btn_2.text):
                     print("Followed: " + username)
+                    if updated_server:
+                        self.firebase.set_statistics(follows=[username])
+                    self.firebase.local_save(followed=[username])
                     return username
                 else:
                     print("FAIL: Insta follow block")
@@ -237,19 +225,21 @@ class InstaBot:
         return unfollow_list
 
     def __go_to_following__(self):
-        self.chrome.get("https://www.instagram.com/" + self.username)
-        sleep(2)
+        if self.username not in self.chrome.current_url:
+            self.chrome.get("https://www.instagram.com/" + self.username + "/following/")
+        sleep(2 + latency)
         header_btns = self.chrome.find_elements_by_class_name(" LH36I")
         header_btns[2].click()
-        sleep(2)
+        sleep(2 + latency)
         if "following" not in self.chrome.current_url:
-            self.chrome.refresh()
-            sleep(1)
+            self.chrome.execute_script("arguments[0].click();", header_btns[2])
+            sleep(2 + latency)
         user_list = self.chrome.find_elements_by_class_name("wo9IH")
         if len(user_list) == 0:
+            self.chrome.refresh()
             self.__go_to_following__()
 
-    def __unfollow_user_from_list__(self, user_element)->str:
+    def __unfollow_user_from_list__(self, user_element, update_server=False)->str:
         try:
             user_text = str(user_element.text).split("\n")
             username = user_text[0]
@@ -272,6 +262,9 @@ class InstaBot:
                             follow_btn_text = str(follow_btn.text)
                             if ("Requested" not in follow_btn_text) & ("Following" not in follow_btn_text):
                                 print("Unfollowed: " + username)
+                                if update_server:
+                                    self.firebase.set_statistics(unfollows=[username])
+                                self.firebase.local_save(unfollowed=[username])
                                 return username
         except Exception as e:
             print(e)
@@ -343,3 +336,41 @@ class InstaBot:
                     self.__scroll_from_user_list__(user_element=user)
             user_list = self.chrome.find_elements_by_class_name("wo9IH")
             search_list = self.__get_search_list__(user_list)
+
+    def verify_if_available(self):
+        choice_options = self.chrome.find_elements_by_class_name("UuB0U ")
+        email_text = ""
+        phone_text = ""
+        if len(choice_options) > 0:
+            for choice in choice_options:
+                if "Email" in choice.text:
+                    email_text = choice.text
+                if "Phone" in choice.text:
+                    phone_text = choice.text
+            self.firebase.set_management_value(ManagementLocations.verifier, str(email_text) + "\n" + str(phone_text))
+        while not self.verified:
+            sleep(1)
+
+    def __verifier_click__(self, option: str):
+        choice_options = self.chrome.find_elements_by_class_name("UuB0U ")
+        for choice in choice_options:
+            if option in str(choice.text):
+                self.chrome.execute_script("arguments[0].click();", choice)
+                choice.click()
+                sleep(3)
+                secuirty_btn = self.chrome.find_element_by_xpath(
+                    '//*[contains(concat( " ", @class, " " ), concat( " ", "_5f5mN       jIbKX KUBKM      yZn4P   ", " " ))]')
+                self.chrome.execute_script("arguments[0].click();", secuirty_btn)
+                sleep(1)
+
+    def __verifier_code_enter__(self, code: str):
+        code_field = self.chrome.find_element_by_id("security_code")
+        code_field.send_keys(code)
+        code_field.send_keys(u'\ue007')
+        sleep(2)
+        if "challenge" not in self.chrome.current_url:
+            self.verified = True
+            self.firebase.set_management_value(ManagementLocations.verifier, "")
+        else:
+            print("Validation Failed, send notification")
+
